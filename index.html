@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Psychedelic Flower</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none;
+  }
+  canvas {
+    position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+    touch-action: none; cursor: crosshair;
+  }
+  #ui {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 999px;
+    background: rgba(10, 6, 20, .45); border: 1px solid rgba(255,255,255,.12);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    transition: opacity .5s; touch-action: manipulation;
+    max-width: calc(100vw - 32px); box-sizing: border-box;
+  }
+  #ui.hidden { opacity: 0; pointer-events: none; }
+  #ui button {
+    width: 40px; height: 40px; flex: none; border-radius: 50%; border: 0;
+    background: rgba(255,255,255,.1); color: #fff; display: grid; place-items: center;
+    cursor: pointer; padding: 0;
+  }
+  #ui button:active { background: rgba(255,255,255,.25); }
+  #ui svg { width: 18px; height: 18px; fill: currentColor; }
+  #ui label { display: flex; align-items: center; gap: 8px; color: #fffa; font: 12px system-ui, sans-serif; letter-spacing: .04em; }
+  #trip { width: min(42vw, 180px); accent-color: #e06cff; height: 28px; margin: 0; }
+  #hint {
+    position: fixed; left: 0; right: 0; text-align: center;
+    top: calc(14px + env(safe-area-inset-top));
+    color: #fff9; font: 12px/1.5 system-ui, sans-serif; letter-spacing: .03em;
+    pointer-events: none; transition: opacity .8s; text-shadow: 0 1px 3px #000; padding: 0 16px;
+  }
+  #err, .msg {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; display: none; place-items: center; color: #f9c; background: #000;
+    font: 15px/1.5 system-ui, sans-serif; white-space: pre-wrap; padding: 24px; text-align: center; z-index: 10;
+  }
+  .msg { display: grid; }
+</style>
+<script>
+  // Plain ES5 on purpose: runs even in old/limited web views, so a failure shows a message instead of black.
+  window.__flowerFrames = 0;
+  window.__flowerTip = '\n\nIf you opened this in an "HTML viewer" or file-manager app, open it in a real browser instead ' +
+    '(Chrome, Firefox, Samsung Internet or Safari). Viewer apps usually switch off WebGL or JavaScript.';
+  window.__flowerMsg = function (m) {
+    var e = document.getElementById('err'), ui = document.getElementById('ui');
+    if (!e) return;
+    e.textContent = m + window.__flowerTip;
+    e.style.display = 'grid';
+    if (ui) ui.style.display = 'none';
+  };
+  window.addEventListener('error', function (ev) {
+    if (!window.__flowerFrames) window.__flowerMsg('Something went wrong: ' + (ev.message || 'script error'));
+  });
+  setTimeout(function () {
+    if (!window.__flowerFrames) window.__flowerMsg('The flower could not be drawn on this browser.');
+  }, 5000);
+</script>
+</head>
+<body>
+<noscript><div class="msg">This flower needs JavaScript, which is switched off here.
+
+If you opened this in an "HTML viewer" or file-manager app, open it in a real browser instead (Chrome, Firefox, Samsung Internet or Safari).</div></noscript>
+<canvas id="c"></canvas>
+<div id="hint"></div>
+<div id="ui">
+  <button id="pause" aria-label="Pause">
+    <svg id="icoPause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+    <svg id="icoPlay" viewBox="0 0 24 24" style="display:none"><path d="M7 4l13 8-13 8z"/></svg>
+  </button>
+  <label>trip <input id="trip" type="range" min="0" max="2" step="0.01" value="1" aria-label="Trip intensity"></label>
+  <button id="save" aria-label="Save image">
+    <svg viewBox="0 0 24 24"><path d="M11 3h2v10l3.5-3.5 1.4 1.4L12 16.8 6.1 10.9l1.4-1.4L11 13zM4 18h16v2H4z"/></svg>
+  </button>
+</div>
+<div id="err"></div>
+
+<!-- shared by both passes -->
+<script id="common" type="x-shader/x-fragment">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec2  uLight;
+uniform float uTrip;
+uniform float uZoom;
+
+#define PI  3.14159265
+#define TAU 6.28318531
+
+float hash(vec2 p){ p = fract(p*vec2(123.34, 456.21)); p += dot(p, p+45.32); return fract(p.x*p.y); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.-2.*f);
+  return mix(mix(hash(i), hash(i+vec2(1,0)), u.x),
+             mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), u.x), u.y);
+}
+vec3 trip(float t){
+  return vec3(.5,.45,.55) + vec3(.5,.5,.45)*cos(TAU*(t + vec3(.02,.36,.70)));
+}
+vec3 lin(vec3 c){ return c*c; }
+vec2 rot2(vec2 v, float a){ float c = cos(a), s = sin(a); return vec2(c*v.x - s*v.y, s*v.x + c*v.y); }
+
+// screen pixel -> flower space, with the liquid breathing warp
+vec2 worldPos(vec2 frag){
+  vec2 p = (frag - .5*uRes)/min(uRes.x, uRes.y)*uZoom;
+  float r0 = length(p), t = uTime;
+  p *= 1. + .015*sin(t*.6);
+  p += uTrip*.012*vec2(sin(p.y*9. + t*1.3 + r0*4.), cos(p.x*9. - t*1.1 + r0*4.));
+  return p;
+}
+vec3 lightDir(){ return normalize(vec3(uLight, .8)); }
+
+// all layers turn together (so dew drops stay put), each with a small sway
+void layerParams(int i, out float n, out float R, out float W, out float rot){
+  float t = uTime;
+  float fi = float(i);
+  if(i==0){      n=10.; R=.96; W=.24; rot=0.; }
+  else if(i==1){ n=10.; R=.84; W=.25; rot=PI/10.; }
+  else if(i==2){ n=12.; R=.66; W=.27; rot=.2; }
+  else if(i==3){ n=12.; R=.47; W=.30; rot=.2+PI/12.; }
+  else {         n=8.;  R=.30; W=.38; rot=.1; }
+  rot += t*.03 + .025*sin(t*.5 + fi*1.7);
+  R *= 1. + .022*sin(t*.9 + fi*.8);   // breathing
+}
+float petalScale(float id, float lid){ return 1. + .07*sin(id*2.7 + lid*1.3); }
+float petalBend(float id, float lid){ return .10*sin(id*1.9 + lid*2.3); }
+</script>
+
+<!-- pass 1: the flower and backdrop -->
+<script id="sceneFrag" type="x-shader/x-fragment">
+float fbm(vec2 p){
+  float s = 0., a = .5;
+  mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
+  for(int i=0;i<FBM_OCT;i++){ s += a*noise(p); p = m*p; a *= .5; }
+  return s;
+}
+
+// coverage of one petal ring; info = (u along petal, v across petal, petal id, edge distance)
+float evalLayer(vec2 p, int li, float aa, out vec4 info, out float axis){
+  float n, R, W, rot;
+  layerParams(li, n, R, W, rot);
+  float lid = float(li);
+  float r = length(p);
+  float a = mod(atan(p.y, p.x) - rot, TAU);
+  float sec = TAU/n;
+  float baseId = floor(a/sec + .5);
+  float bestCov = 0., bestZ = -1.;
+  info = vec4(0.); axis = 0.;
+  for(int k=-1;k<=1;k++){
+    float id = baseId + float(k);
+    float da = a - id*sec;
+    vec2 q = r*vec2(cos(da), sin(da));
+    float idm = mod(id + n, n);
+    float Rr = R*petalScale(idm, lid);
+    float u = q.x/Rr;
+    if(u <= 0. || u >= 1.) continue;
+    float y = q.y/Rr - petalBend(idm, lid)*u*u;
+    float hw = W*pow(max(sin(PI*pow(u, 1.3)), 1e-4), .65);
+    hw *= 1. + .06*sin(u*20. + idm*3.1 + lid)*u*u + .05*(noise(vec2(u*12., idm*5. + lid*11.)) - .5);
+    float edge = (hw - abs(y))*Rr;
+    float cov = smoothstep(-aa*.4, aa*.6, edge);
+    if(cov <= 0.) continue;
+    float z = mod(idm, 2.);
+    if(z > bestZ){
+      bestZ = z;
+      info = vec4(u, y/hw, idm, edge);
+      axis = id*sec + rot;
+    }
+    bestCov = max(bestCov, cov);
+  }
+  return bestCov;
+}
+
+float veins(float u, float v, float id){
+  float fan = v*(.3 + .7*u);
+  float w = noise(vec2(u*4., id*3.7 + v*2.))*.6;
+  float f1 = abs(fract(fan*3.5 + w) - .5)*2.;
+  float f2 = abs(fract(fan*9. + w*1.7 + .25) - .5)*2.;
+  float main_ = 1. - smoothstep(0., .12, f1);
+  float fine  = 1. - smoothstep(0., .08, f2);
+  float mid = 1. - smoothstep(0., .06, abs(v));
+  float fade = smoothstep(1., .55, u);            // veins fade before the tip
+  return max(main_*.55 + fine*.25, mid*.8)*fade;
+}
+float petalH(float u, float v, float id){
+  return .30*(1. - v*v) + .12*sin(u*PI*.9) - .022*veins(u, v, id)
+       + .006*noise(vec2(u*14., v*5. + id*9.));
+}
+
+vec3 shadePetal(vec4 info, float axis, int li, vec3 L, vec2 p, float shadow){
+  float u = info.x, v = info.y, id = info.z, edge = info.w;
+  float lid = float(li);
+  float t = uTime;
+
+  // normal from the height field (finite differences in petal space)
+  float e = .01;
+  float dhu = (petalH(u+e, v, id) - petalH(u-e, v, id))/(2.*e);
+  float dhv = (petalH(u, v+e, id) - petalH(u, v-e, id))/(2.*e);
+  vec3 nl = normalize(vec3(-dhu*1.2, -dhv*1.8, 1.));
+  vec3 N = vec3(rot2(nl.xy, axis), nl.z);
+
+  // pigment: dark throat -> body -> glowing tip, shifting through the spectrum
+  float hue = lid*.13 + u*.32 + .04*sin(id*1.7 + lid) + t*.035;
+  vec3 base = lin(trip(hue));
+  vec3 tip  = lin(trip(hue + .22));
+  vec3 deep = lin(trip(hue - .18))*.25;
+  vec3 c = mix(deep, base, smoothstep(0., .45, u));
+  c = mix(c, tip, smoothstep(.45, 1., u));
+  float vn = veins(u, v, id);
+  c = mix(c, deep*1.8, vn*.22*(1. - u*.5));
+  c *= mix(.35, 1., smoothstep(0., .5, u));      // velvety throat
+
+  // pulses of colour travelling out along each petal
+  float ring = .5 + .5*sin(u*28. - t*2.5 + lid*1.3);
+  c *= 1. + (ring - .5)*.35*uTrip;
+
+  // thin-film iridescence at grazing angles
+  float fres = 1. - N.z;
+  vec3 ir = lin(trip(fres*3. + u*2. + t*.15));
+  c = mix(c, ir, clamp(fres*1.6, 0., 1.)*.45*uTrip);
+
+  // lighting
+  float ndl = dot(N, L);
+  float diff = max((ndl + .35)/1.35, 0.);
+  vec3 H = normalize(L + vec3(0, 0, 1));
+  float spec = pow(max(dot(N, H), 0.), 48.)*.35;
+  float sss = smoothstep(.55, 1., abs(v))*.5 + smoothstep(.6, 1., u)*.4;  // thin edges glow
+  float ao = mix(.22, 1., smoothstep(0., .4, u));
+
+  vec3 col = c*(.15 + diff)*ao;
+  col += c*sss*.7*(1. - shadow*.5);
+  col += spec*(1. - shadow);
+  col *= 1. - shadow*.6;
+  col *= .95 + .1*noise(p*420.);                 // cell texture
+  col *= mix(.7, 1., smoothstep(0., .006, edge)); // slight rim definition
+  return col;
+}
+
+vec4 centerDisk(vec2 p, vec3 L){
+  float t = uTime;
+  float Rc = .15*(1. + .03*sin(t*1.1));
+  float r = length(p);
+  if(r > Rc*1.45) return vec4(0.);
+  float a = atan(p.y, p.x);
+  float edgeR = Rc*(1. + .025*sin(a*21. + t));
+  vec3 H = normalize(L + vec3(0, 0, 1));
+
+  // stamens ringing the disk
+  float cnt = 72.;
+  float sa = mod(a - t*.03, TAU)/TAU*cnt;
+  float si = floor(sa);
+  float lat = (fract(sa) - .5)*(TAU/cnt)*r;
+  float len = Rc*(1.16 + .2*hash(vec2(si, 3.)));
+  float line = smoothstep(.0022, .0008, abs(lat))*step(r, len)*step(Rc*.9, r);
+  float bulb = smoothstep(.0065, .0045, length(vec2(r - len, lat)));
+  vec3 gold = lin(trip(.12 + hash(vec2(si, 7.))*.2 + t*.05));
+  float glow = .6 + .4*sin(si*.9 - t*4.);
+  vec4 stam = vec4(mix(gold*.5, gold*(1.6 + glow*uTrip), bulb), max(line*.9, bulb));
+
+  if(r > edgeR) return stam;
+
+  // golden-angle phyllotaxis: find the nearest seed
+  float N = 260.;
+  float c = Rc/sqrt(N);
+  float n0 = (r/c)*(r/c);
+  float rot = -t*.08;
+  float bestD = 1e5, bestN = 0.;
+  vec2 bestS = vec2(0.);
+  for(int k=-36;k<=36;k++){
+    float nn = floor(n0) + float(k);
+    if(nn < 0.) continue;
+    float th = nn*2.39996323 + rot;
+    vec2 s = c*sqrt(nn + .5)*vec2(cos(th), sin(th));
+    float d = length(p - s);
+    if(d < bestD){ bestD = d; bestN = nn; bestS = s; }
+  }
+  float sr = c*.95;
+  float dd = bestD/sr;
+  float h = sqrt(max(1. - dd*dd, 0.));
+  vec3 nrm = normalize(vec3((p - bestS)/sr*.9, h + .15));
+  nrm = normalize(nrm + normalize(vec3(p/Rc*.6, 1.))*.6);
+
+  float rr = bestN/N;
+  vec3 c1 = lin(trip(.55 + rr*.4 + t*.05));
+  vec3 c2 = lin(trip(.10 + rr*.3 - t*.03));
+  vec3 col = mix(c2*.3, c1, smoothstep(0., .9, h));
+  // light racing along the 13- and 21-spirals
+  float sp13 = pow(.5 + .5*sin(bestN*TAU/13. - t*1.5), 8.);
+  float sp21 = pow(.5 + .5*sin(bestN*TAU/21. + t*1.1), 8.);
+  float wave = pow(.5 + .5*sin(bestN*.12 - t*3.), 6.);
+  col += c1*(sp13*.6 + sp21*.4 + wave*.5)*h*uTrip;
+
+  float diff = max(dot(nrm, L), 0.);
+  float spec = pow(max(dot(nrm, H), 0.), 30.)*.5*h;
+  vec3 outc = col*(.15 + diff*.9) + spec;
+  outc *= mix(.12, 1., smoothstep(0., .35, h));
+  outc += lin(trip(t*.07 + .8))*exp(-r/Rc*5.)*.4;
+  float cov = smoothstep(edgeR, edgeR - .004, r);
+  return vec4(mix(stam.rgb, outc, cov), max(cov, stam.a));
+}
+
+vec3 background(vec2 p){
+  float t = uTime*.05;
+  vec2 q  = vec2(fbm(p*1.5 + t), fbm(p*1.5 - t + 5.2));
+  vec2 r2 = vec2(fbm(p*2. + 4.*q + vec2(1.7, 9.2) + t*2.), fbm(p*2. + 4.*q + vec2(8.3, 2.8) - t));
+  float f = fbm(p*1.8 + 4.*r2);
+  vec3 c = lin(trip(f*1.2 + length(q)*.6 + uTime*.03));
+  c *= .03 + .16*f*f*f*uTrip;
+  float r = length(p);
+  float a = atan(p.y, p.x);
+  float aura = exp(-max(r - .75, 0.)*3.5)*(.6 + .4*sin(a*10. + uTime*.4 + r*8.));
+  c += lin(trip(r*.8 - uTime*.1))*aura*.22*uTrip;
+  c += lin(trip(r*.5 + .3))*.03*max(sin(r*40. - uTime*2.), 0.)*uTrip*smoothstep(2., .8, r);
+  c *= smoothstep(2.6, .4, r);
+  return c;
+}
+
+// front-to-back compositing: seed head, then petal rings inner -> outer, then backdrop
+vec3 scene(vec2 p, vec3 L){
+  vec2 so = L.xy*.035;
+  vec3 acc = vec3(0.);
+  float tr = 1.;
+
+  vec4 cd = centerDisk(p, L);
+  acc += cd.rgb*cd.a;
+  tr *= 1. - cd.a;
+  float shadow = smoothstep(.21, .12, length(p + so))*.9;
+
+  for(int k=0;k<5;k++){
+    if(tr < .002) break;
+    int li = 4 - k;
+    vec4 info; float axis;
+    float cov = evalLayer(p, li, .0035, info, axis);
+    if(cov > 0.){
+      acc += shadePetal(info, axis, li, L, p, shadow)*cov*tr;
+      tr *= 1. - cov;
+    }
+    vec4 i2; float a2;
+    shadow = max(shadow, evalLayer(p + so, li, .05, i2, a2)*.9);
+  }
+  if(tr > .002) acc += background(p)*(1. - .6*shadow)*tr;
+  return acc;
+}
+
+void main(){
+  vec3 col = scene(worldPos(gl_FragCoord.xy), lightDir());
+  // pack HDR into 8 bits: x/(1+x), then sqrt to keep dark tones from banding
+  gl_FragColor = vec4(sqrt(col/(1. + col)), 1.);
+}
+</script>
+
+<!-- pass 2: dew drops refracting pass 1, tone mapping, grain -->
+<script id="compFrag" type="x-shader/x-fragment">
+uniform sampler2D uScene;
+
+vec3 sceneAt(vec2 uv){
+  vec3 e = texture2D(uScene, uv).rgb;
+  e *= e;
+  return e/max(1. - e, 1e-3);
+}
+
+// dew drops sit on the outer petals (xy = centre, z = radius)
+vec3 dropPos(int i){
+  float id, u, rd;
+  if(i==0){      id=0.; u=.80; rd=.040; }
+  else if(i==1){ id=2.; u=.74; rd=.028; }
+  else if(i==2){ id=3.; u=.83; rd=.048; }
+  else if(i==3){ id=5.; u=.77; rd=.034; }
+  else if(i==4){ id=7.; u=.82; rd=.038; }
+  else {         id=9.; u=.76; rd=.025; }
+  float n, R, W, rot;
+  layerParams(0, n, R, W, rot);
+  float Rr = R*petalScale(id, 0.);
+  float bend = petalBend(id, 0.)*u*u;
+  float ang = id*TAU/n + rot;
+  vec2 ax = vec2(cos(ang), sin(ang)), pe = vec2(-ax.y, ax.x);
+  return vec3((ax*u + pe*bend)*Rr, rd);
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy/uRes;
+  vec2 p = worldPos(gl_FragCoord.xy);
+  vec3 L = lightDir();
+  float t = uTime;
+  vec3 col = sceneAt(uv);
+
+  float hit = 0., dshadow = 0.;
+  vec2 dc = vec2(0.); float drd = 1.;
+  for(int i=0;i<6;i++){
+    vec3 d = dropPos(i);
+    vec2 q = (p - d.xy)/d.z;
+    float l = length(q);
+    if(l < 1.){ hit = 1.; dc = d.xy; drd = d.z; }
+    float s = length(q + L.xy*.45);
+    dshadow = max(dshadow, smoothstep(1.3, .8, s)*step(1., l));
+  }
+  col *= 1. - .45*dshadow;
+
+  if(hit > 0.){
+    vec2 q = (p - dc)/drd;
+    float l = length(q);
+    float z = sqrt(max(1. - l*l, 0.));
+    // magnified view through the drop: world offset -> screen offset
+    vec2 off = (dc + (p - dc)*(.3 + .25*z)) - p;
+    vec2 ruv = uv + off/uZoom*min(uRes.x, uRes.y)/uRes;
+    vec3 refr = sceneAt(ruv)*1.15;
+    vec3 n = normalize(vec3(q, z));
+    float fres = pow(1. - z, 2.5);
+    vec3 env = lin(trip(fres*1.5 + t*.1))*.6;
+    vec3 dcol = mix(refr, env, fres*.6);
+    dcol *= 1. - .55*smoothstep(.7, 1., l);
+    vec3 H = normalize(L + vec3(0, 0, 1));
+    dcol += pow(max(dot(n, H), 0.), 140.)*3.;
+    dcol += refr*smoothstep(.55, 0., length(q + L.xy*.5))*.9;   // caustic
+    col = mix(col, dcol, smoothstep(1., .94, l));
+  }
+
+  col *= 1.25;
+  col = (col*(2.51*col + .03))/(col*(2.43*col + .59) + .14);
+  col = pow(clamp(col, 0., 1.), vec3(1./2.2));
+  col += (hash(gl_FragCoord.xy + fract(t)*137.) - .5)*.022;
+  gl_FragColor = vec4(col, 1.);
+}
+</script>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('c'), hint = $('hint'), ui = $('ui'), err = $('err'), slider = $('trip');
+  const touch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+
+  hint.textContent = touch
+    ? 'drag to move the light'
+    : 'mouse — light  ·  scroll — trip  ·  space — pause  ·  S — save';
+
+  const fail = (m) => { window.__flowerFrames = -1; window.__flowerMsg(m); throw new Error(m); };
+
+  // ---------- GL setup (re-run after a context loss) ----------
+  const gl = canvas.getContext('webgl', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+  if (!gl) fail('WebGL (3D graphics) is not available in this browser.');
+
+  let progScene, progComp, fbo, fboTex, fboW = 0, fboH = 0, U1, U2;
+  const names = ['uRes', 'uTime', 'uLight', 'uTrip', 'uZoom'];
+
+  function build(fragId) {
+    const defs = '#define FBM_OCT ' + (touch ? 4 : 5) + '\n';
+    const src = defs + $('common').textContent + $(fragId).textContent;
+    const vs = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0., 1.); }');
+    gl.compileShader(vs);
+    const fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs, src);
+    gl.compileShader(fs);
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS) && !gl.isContextLost()) fail(gl.getShaderInfoLog(fs));
+    const p = gl.createProgram();
+    gl.attachShader(p, vs); gl.attachShader(p, fs);
+    gl.bindAttribLocation(p, 0, 'a');
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) fail(gl.getProgramInfoLog(p));
+    const U = {};
+    for (const n of names.concat('uScene')) U[n] = gl.getUniformLocation(p, n);
+    return [p, U];
+  }
+
+  function init() {
+    [progScene, U1] = build('sceneFrag');
+    [progComp, U2] = build('compFrag');
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    fboTex = gl.createTexture();
+    fbo = gl.createFramebuffer();
+    fboW = fboH = 0;
+    resize(true);
+  }
+
+  function sizeTarget() {
+    if (fboW === canvas.width && fboH === canvas.height) return;
+    fboW = canvas.width; fboH = canvas.height;
+    gl.bindTexture(gl.TEXTURE_2D, fboTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fboW, fboH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // ---------- state ----------
+  const dprCap = Math.min(window.devicePixelRatio || 1, touch ? 2 : 1.5);
+  const maxScale = 1, minScale = 0.3;
+  let scale = touch ? 0.55 : 1;              // phones start low and climb if there's headroom
+  const light = [-0.55, 0.6], target = [-0.55, 0.6];
+  let lastMove = -1e9;
+  let trip = 1, tripTarget = 1;
+  let paused = false, t = 0, last = performance.now();
+  let frameAvg = 16, frames = 0;
+
+  function resize(force) {
+    const w = Math.max(1, Math.round(innerWidth * dprCap * scale));
+    const h = Math.max(1, Math.round(innerHeight * dprCap * scale));
+    if (force || canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    sizeTarget();
+  }
+  addEventListener('resize', () => resize());
+  addEventListener('orientationchange', () => setTimeout(() => resize(), 250));
+
+  // ---------- input ----------
+  let uiTimer;
+  function showUI() {
+    ui.classList.remove('hidden');
+    clearTimeout(uiTimer);
+    uiTimer = setTimeout(() => ui.classList.add('hidden'), touch ? 4000 : 3000);
+  }
+  function setLight(e) {
+    const m = Math.min(innerWidth, innerHeight);
+    let x = (e.clientX - innerWidth / 2) / m * 2;
+    let y = -(e.clientY - innerHeight / 2) / m * 2;
+    const l = Math.hypot(x, y);
+    if (l > 1.3) { x *= 1.3 / l; y *= 1.3 / l; }
+    target[0] = x; target[1] = y;
+    lastMove = performance.now();
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+    setLight(e); showUI(); hint.style.opacity = '0';
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'mouse' || e.buttons || e.pressure > 0) setLight(e);
+    if (e.pointerType === 'mouse') showUI();
+  });
+  ui.addEventListener('pointerdown', showUI);
+
+  slider.addEventListener('input', () => { tripTarget = +slider.value; showUI(); });
+  addEventListener('wheel', (e) => {
+    tripTarget = Math.min(2, Math.max(0, tripTarget - e.deltaY * 0.0012));
+    slider.value = tripTarget;
+    showUI();
+  }, { passive: true });
+
+  function setPaused(v) {
+    paused = v;
+    $('icoPause').style.display = paused ? 'none' : '';
+    $('icoPlay').style.display = paused ? '' : 'none';
+    $('pause').setAttribute('aria-label', paused ? 'Play' : 'Pause');
+  }
+  $('pause').addEventListener('click', () => { setPaused(!paused); showUI(); });
+  $('save').addEventListener('click', () => { save(); showUI(); });
+  addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { setPaused(!paused); e.preventDefault(); }
+    else if (e.key === 's' || e.key === 'S') save();
+  });
+
+  // render a frame and grab it in the same task (no preserveDrawingBuffer needed)
+  function save() {
+    draw();
+    canvas.toBlob(async (b) => {
+      if (!b) return;
+      const file = new File([b], 'psychedelic-flower.png', { type: 'image/png' });
+      if (touch && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file] }); return; } catch (_) { /* fall through */ }
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }, 'image/png');
+  }
+
+  // ---------- context loss (common on phones when backgrounded) ----------
+  let lost = false;
+  let losses = 0;
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault(); lost = true;
+    scale = Math.max(minScale, scale * 0.6);   // come back lighter in case the GPU timed out
+    if (++losses >= 3) {
+      window.__flowerFrames = -1;
+      window.__flowerMsg('This device\'s graphics chip keeps resetting while drawing the flower.');
+    }
+  });
+  canvas.addEventListener('webglcontextrestored', () => { lost = false; init(); });
+
+  // ---------- render ----------
+  function setUniforms(U) {
+    const zoom = canvas.width < canvas.height ? 2.45 : 2.25;   // a little margin in portrait
+    gl.uniform2f(U.uRes, canvas.width, canvas.height);
+    gl.uniform1f(U.uTime, t + 12.0);
+    gl.uniform2f(U.uLight, light[0], light[1]);
+    gl.uniform1f(U.uTrip, trip);
+    gl.uniform1f(U.uZoom, zoom);
+  }
+  function draw() {
+    if (lost) return;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, fboW, fboH);
+    gl.useProgram(progScene);
+    setUniforms(U1);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(progComp);
+    setUniforms(U2);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboTex);
+    gl.uniform1i(U2.uScene, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (window.__flowerFrames >= 0) window.__flowerFrames++;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    if (!paused) t += dt;
+
+    if (now - lastMove > 4000) {           // light drifts on its own when idle
+      target[0] = -0.55 + 0.35 * Math.sin(t * 0.21);
+      target[1] = 0.6 + 0.25 * Math.cos(t * 0.17);
+    }
+    const k = 1 - Math.exp(-dt * 4);
+    light[0] += (target[0] - light[0]) * k;
+    light[1] += (target[1] - light[1]) * k;
+    trip += (tripTarget - trip) * (1 - Math.exp(-dt * 3));
+
+    // adaptive resolution. Thresholds leave 30 Hz-capped screens (iOS low power) alone.
+    frameAvg = frameAvg * 0.94 + dt * 1000 * 0.06;
+    if (++frames > 60) {
+      if (frameAvg > 40 && scale > minScale) { scale = Math.max(minScale, scale * 0.85); resize(); frames = 0; }
+      else if (frameAvg < 20 && scale < maxScale) { scale = Math.min(maxScale, scale / 0.92); resize(); frames = 0; }
+    }
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+  init();
+  draw();          // first frame right away, not on the next animation tick
+  showUI();
+  setTimeout(() => { hint.style.opacity = '0'; }, 6000);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
